@@ -332,6 +332,7 @@ def _cli_person_webcam(args) -> None:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
 
         lm = get_head_foot_pixels(frame)
+        flag=False
         
         # Position helper logic
         if lm:
@@ -350,6 +351,7 @@ def _cli_person_webcam(args) -> None:
                 else:
                     pos_txt = "POSITION: OK"
                     pos_color = (0, 255, 0) # Green
+                    flag=True
             else:
                 pos_txt = "POSITION: OK (Uncalibrated spot)"
                 pos_color = (0, 255, 255) # Yellow
@@ -374,8 +376,8 @@ def _cli_person_webcam(args) -> None:
             median_h = float(np.median(list(history)))
             status_colour = (0, 255, 0) if src in ("calibrated_scale", "default_scale") else (0, 165, 255)
             height_txt = f"Height: {median_h:.1f} cm  [{src}]"
-            if h_cm is not None and src in ("calibrated_scale", "default_scale"):
-                print(f"\r  height_cm={median_h:.1f}  source={src:<18s}", end="", flush=True)
+            if flag and h_cm is not None and src in ("calibrated_scale", "default_scale"):
+                print(f"\r  when position is OKKK height_cm={median_h:.1f}  source={src:<18s}", end="", flush=True)
         else:
             status_colour = (0, 165, 255) # Orange
             height_txt = "Height: Detecting..."

@@ -12,7 +12,7 @@ import sys
 
 # Ensure path includes parent folder for proper package imports when executed directly
 sys.path.insert(0, str(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-
+import threading
 import argparse
 import time
 from typing import Any, Dict, Literal, Optional, Tuple
@@ -292,10 +292,11 @@ def _run_person_calibration(cap, ref_person_cm: float) -> Optional[float]:
             print(f"          Saved to      : config/height_calibration.json\n")
             return pixels_per_cm
 
-
+from src.skin.mst_pipeline.pipeline import MSTPipeline
 def _cli_person_webcam(args) -> None:
     """Live-view CLI for single-webcam person height measurement using pre-calibrated scale."""
     import collections
+    import threading
     from src.height.landmarks import get_head_foot_pixels, draw_landmarks_overlay
     from src.height.height_webcam import get_person_height_webcam, load_calibration_data
 
@@ -315,7 +316,48 @@ def _cli_person_webcam(args) -> None:
         scale_label = f"MANUAL ({scale:.2f} px/cm)"
     else:
         scale_label = f"CALIBRATED ({scale:.2f} px/cm)"
-
+    # Initialize MST Pipeline
+   # Initialize MST Pipeline identical to demo.py
+    # Initialize MST Pipeline (disable white balance for webcams to prevent blue tint)
+    mst_pipeline = MSTPipeline(
+        prefer_mediapipe=not getattr(args, "no_mediapipe", False),
+        white_balance=False,
+        use_color_card=getattr(args, "use_color_card", False),
+    )
+    saved_mst_result = None
+    mst_status_str = "Scanning face..."
+    mst_in_progress = False
+    def print_mst_summary(result) -> None:
+        print(f"Backend used:       {result.backend}")
+        print(f"MST category:       {result.mst.mst_category}  (1=lightest, 10=darkest)")
+        print(f"Confidence:         {result.mst.confidence:.2f}  (separation from runner-up category)")
+        print(f"Sample Lab (L,a,b): {tuple(round(x, 2) for x in result.mst.sample_lab)}")
+        print(f"ITA (degrees):      {result.mst.ita_degrees:.1f}")
+        print(f"Skin pixels used:   {result.n_pixels_used}  (rejected {result.rejected_fraction:.0%} as over/under-exposed)")
+        print(f"Face regions used:  {', '.join(result.regions_used)}")
+        if getattr(result, "regions_excluded", None):
+            print(f"Regions EXCLUDED:   {', '.join(result.regions_excluded)}")
+            
+        print()
+        print("Distance to each MST category (lower = closer):")
+        for cat, dist in sorted(result.mst.distances.items()):
+            marker = "  <-- best match" if cat == result.mst.mst_category else ""
+            print(f"  MST-{cat}: {dist:6.2f}{marker}")
+        print()
+    def run_mst_async(frame_bgr: np.ndarray):
+        nonlocal saved_mst_result, mst_status_str, mst_in_progress
+        try:
+            # Pass copy of frame to prevent race conditions
+            res = mst_pipeline.classify_array(frame_bgr)
+            saved_mst_result = res
+            mst_status_str = f"MST-{res.mst.mst_category}"
+            print_mst_summary(res)
+        except Exception as e:
+            # Log exact exception to console for debugging
+            # print(f"[DEBUG MST] Classification failed: {e}")
+            mst_status_str = "Scanning face (No face detected)..."
+        finally:
+            mst_in_progress = False
     print(f"[INFO] Person height live view | Marker-free mode | Scale: {scale_label}")
     print("       Press Q or ESC to quit.")
 
@@ -330,7 +372,14 @@ def _cli_person_webcam(args) -> None:
         display = frame.copy()
         cv2.putText(display, f"Scale: {scale_label}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
-
+        # 1. Continuous Upfront MST Scanning (until locked)
+        if saved_mst_result is None and not mst_in_progress:
+            mst_in_progress = True
+            threading.Thread(
+                target=run_mst_async,
+                args=(frame.copy(),),
+                daemon=True
+            ).start()
         lm = get_head_foot_pixels(frame)
         flag=False
         
@@ -377,14 +426,25 @@ def _cli_person_webcam(args) -> None:
             status_colour = (0, 255, 0) if src in ("calibrated_scale", "default_scale") else (0, 165, 255)
             height_txt = f"Height: {median_h:.1f} cm  [{src}]"
             if flag and h_cm is not None and src in ("calibrated_scale", "default_scale"):
-                print(f"\r  when position is OKKK height_cm={median_h:.1f}  source={src:<18s}", end="", flush=True)
+                mst_category = saved_mst_result.mst.mst_category if saved_mst_result else "Scanning..."
+                print(f"\r  when position is OKKK height_cm={median_h:.1f} | MST={mst_category} | source={src:<18s}", end="", flush=True)
+
         else:
             status_colour = (0, 165, 255) # Orange
             height_txt = "Height: Detecting..."
 
-        cv2.putText(display, height_txt, (10, H_frame - 20),
+        cv2.putText(display, height_txt, (10, H_frame - 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_colour, 2, cv2.LINE_AA)
+        
+        if saved_mst_result:
+            mst_display_str = f"MST Category: {saved_mst_result.mst.mst_category} (Locked)"
+            mst_color = (0, 255, 0)  # Green when locked
+        else:
+            mst_display_str = f"MST: {mst_status_str}"
+            mst_color = (0, 165, 255)  # Orange while scanning
 
+        cv2.putText(display, mst_display_str, (10, H_frame - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, mst_color, 2, cv2.LINE_AA)
         cv2.imshow("KYRA Person Height (webcam)", display)
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
@@ -528,6 +588,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ref-object-cm", type=float, default=None)
     p.add_argument("--ref-person-cm", type=float, default=None)
     p.add_argument("--person-mode", action="store_true")
+    # MST Pipeline Flags
+    p.add_argument("--no-mediapipe", action="store_true", help="Use Haar cascade fallback.")
+    p.add_argument("--no-white-balance", action="store_true", help="Disable white balance.")
+    p.add_argument("--use-color-card", action="store_true", help="Enable ColorChecker detection.")
     return p
 
 

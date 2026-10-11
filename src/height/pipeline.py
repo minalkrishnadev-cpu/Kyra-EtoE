@@ -316,9 +316,6 @@ def _cli_person_webcam(args) -> None:
         scale_label = f"MANUAL ({scale:.2f} px/cm)"
     else:
         scale_label = f"CALIBRATED ({scale:.2f} px/cm)"
-    # Initialize MST Pipeline
-   # Initialize MST Pipeline identical to demo.py
-    # Initialize MST Pipeline (disable white balance for webcams to prevent blue tint)
     mst_pipeline = MSTPipeline(
         prefer_mediapipe=not getattr(args, "no_mediapipe", False),
         white_balance=False,
@@ -347,14 +344,11 @@ def _cli_person_webcam(args) -> None:
     def run_mst_async(frame_bgr: np.ndarray):
         nonlocal saved_mst_result, mst_status_str, mst_in_progress
         try:
-            # Pass copy of frame to prevent race conditions
             res = mst_pipeline.classify_array(frame_bgr)
             saved_mst_result = res
             mst_status_str = f"MST-{res.mst.mst_category}"
             print_mst_summary(res)
         except Exception as e:
-            # Log exact exception to console for debugging
-            # print(f"[DEBUG MST] Classification failed: {e}")
             mst_status_str = "Scanning face (No face detected)..."
         finally:
             mst_in_progress = False
@@ -368,18 +362,14 @@ def _cli_person_webcam(args) -> None:
         ok, frame = cap.read()
         if not ok:
             break
+        if not mst_in_progress:
+            mst_in_progress=True
+            t=threading.Thread(target=run_mst_async, args=(frame.copy(),),daemon=True)
+            t.start()
 
         display = frame.copy()
         cv2.putText(display, f"Scale: {scale_label}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
-        # 1. Continuous Upfront MST Scanning (until locked)
-        if saved_mst_result is None and not mst_in_progress:
-            mst_in_progress = True
-            threading.Thread(
-                target=run_mst_async,
-                args=(frame.copy(),),
-                daemon=True
-            ).start()
         lm = get_head_foot_pixels(frame)
         flag=False
         
@@ -407,19 +397,15 @@ def _cli_person_webcam(args) -> None:
         else:
             pos_txt = "POSITION: NO PERSON DETECTED"
             pos_color = (0, 165, 255) # Orange
-
-        # Overlay position status at the top-left of the screen
         cv2.putText(display, pos_txt, (10, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, pos_color, 2, cv2.LINE_AA)
 
         result = get_person_height_webcam(frame, manual_scale=scale)
         h_cm = result.get("height_cm")
         src = result.get("source", "?")
-
-        # Only append to history if we actually measured the height using landmarks
-        if h_cm is not None and src in ("calibrated_scale", "default_scale"):
+        # if h_cm is not None and src in ("calibrated_scale", "default_scale"):
+        if h_cm is not None and src == "calibrated_scale":
             history.append(h_cm)
-
         H_frame = display.shape[0]
         if history:
             median_h = float(np.median(list(history)))
@@ -434,15 +420,17 @@ def _cli_person_webcam(args) -> None:
             height_txt = "Height: Detecting..."
 
         cv2.putText(display, height_txt, (10, H_frame - 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_colour, 2, cv2.LINE_AA)
-        
-        if saved_mst_result:
-            mst_display_str = f"MST Category: {saved_mst_result.mst.mst_category} (Locked)"
-            mst_color = (0, 255, 0)  # Green when locked
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_colour, 2, cv2.LINE_AA)         
+        # mst_display_str = f"Skin Tone: {mst_status_str}"
+        # mst_color = (0, 255, 0) if "MST-" in mst_status_str else (0, 165, 255)
+        # cv2.putText(display, mst_category, (10, H_frame - 20),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.75, mst_color, 2, cv2.LINE_AA)
+        if saved_mst_result is not None:
+            mst_display_str = f"Skin Tone: MST-{saved_mst_result.mst.mst_category}"
+            mst_color = (0, 255, 0)  # Green when showing a valid cached result
         else:
-            mst_display_str = f"MST: {mst_status_str}"
-            mst_color = (0, 165, 255)  # Orange while scanning
-
+            mst_display_str = f"Skin Tone: {mst_status_str}"
+            mst_color = (0, 165, 255)  # Orange while initially scanning
         cv2.putText(display, mst_display_str, (10, H_frame - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, mst_color, 2, cv2.LINE_AA)
         cv2.imshow("KYRA Person Height (webcam)", display)

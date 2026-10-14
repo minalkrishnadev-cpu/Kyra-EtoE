@@ -293,6 +293,7 @@ def _run_person_calibration(cap, ref_person_cm: float) -> Optional[float]:
             return pixels_per_cm
 
 from src.skin.mst_pipeline.pipeline import MSTPipeline
+
 def _cli_person_webcam(args) -> None:
     """Live-view CLI for single-webcam person height measurement using pre-calibrated scale."""
     import collections
@@ -414,7 +415,20 @@ def _cli_person_webcam(args) -> None:
             if flag and h_cm is not None and src in ("calibrated_scale", "default_scale"):
                 mst_category = saved_mst_result.mst.mst_category if saved_mst_result else "Scanning..."
                 print(f"\r  when position is OKKK height_cm={median_h:.1f} | MST={mst_category} | source={src:<18s}", end="", flush=True)
-
+                snapshot_path="/currentcapture.jpg"
+                cv2.imwrite(snapshot_path,frame)
+                import subprocess
+                try:
+                    subprocess.run([
+                        sys.executable, "./src/fit/inference.py",
+                        "-i", snapshot_path,
+                        "-ht",
+                        str(int(median_h))
+                    ], check=True)
+                    print("\n[INFO] Inference pipeline executed successfully. Exiting live view.")
+                    break
+                except subprocess.CalledProcessError as e:
+                    print(f"\n[ERROR] Inference script failed: {e}")
         else:
             status_colour = (0, 165, 255) # Orange
             height_txt = "Height: Detecting..."

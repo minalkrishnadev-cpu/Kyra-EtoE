@@ -49,11 +49,15 @@ def load_calibration_data() -> Dict[str, Any]:
                 data = json.load(f)
                 return {
                     "pixels_per_cm": float(data.get("pixels_per_cm", 12.0)),
-                    "calibrated_base_y": data.get("calibrated_base_y")
+                    "calibrated_base_y": data.get("calibrated_base_y"),
+                    # Orientation the calibration was captured in (None = legacy, unrotated)
+                    "rotation": data.get("rotation"),
+                    # [width, height] of the (rotated) frame used for calibration
+                    "frame_size": data.get("frame_size"),
                 }
         except Exception as e:
             logger.warning(f"Failed to load height_calibration.json: {e}")
-    return {"pixels_per_cm": 12.0, "calibrated_base_y": None}
+    return {"pixels_per_cm": 12.0, "calibrated_base_y": None, "rotation": None, "frame_size": None}
 
 
 def load_calibration_scale() -> float:
@@ -64,14 +68,27 @@ def load_calibration_scale() -> float:
     return load_calibration_data()["pixels_per_cm"]
 
 
-def save_calibration_data(scale: float, base_y: Optional[int] = None) -> None:
-    """Save scale factor and calibrated base Y pixel coordinate to config/height_calibration.json."""
+def save_calibration_data(
+    scale: float,
+    base_y: Optional[int] = None,
+    rotation: Optional[str] = None,
+    frame_size: Optional[Tuple[int, int]] = None,
+) -> None:
+    """
+    Save scale factor and calibrated base Y pixel coordinate to config/height_calibration.json.
+
+    ``base_y`` and ``scale`` must be measured in the same (rotated) frame the live
+    measurement uses. ``rotation`` and ``frame_size`` (width, height) are stored so
+    the person-measurement mode can detect a mismatched calibration.
+    """
     try:
         os.makedirs("config", exist_ok=True)
         config_path = os.path.join("config", "height_calibration.json")
         data = {
             "pixels_per_cm": round(scale, 4),
-            "calibrated_base_y": base_y,
+            "calibrated_base_y": int(base_y) if base_y is not None else None,
+            "rotation": rotation,
+            "frame_size": [int(frame_size[0]), int(frame_size[1])] if frame_size else None,
             "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         with open(config_path, "w", encoding="utf-8") as f:

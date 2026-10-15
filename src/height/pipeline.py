@@ -154,13 +154,84 @@ def measure_height(
 # CLI Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _open_camera(idx: int) -> cv2.VideoCapture:
+# ─────────────────────────────────────────────────────────────────────────────
+# Camera mounting orientation
+# ─────────────────────────────────────────────────────────────────────────────
+# The camera is mounted sideways, so every raw frame must be rotated before it
+# is shown OR measured. Rotation is applied once, at capture time, inside
+# _RotatedCapture.read(). Everything downstream (preview, freeze frame, ROI
+# drawing, landmarks, height maths, calibrated_base_y) therefore works purely
+# in the rotated (upright) coordinate system.
+
+ROTATION_CHOICES = {
+    "none": None,
+    "ccw90": cv2.ROTATE_90_COUNTERCLOCKWISE,
+    "cw90": cv2.ROTATE_90_CLOCKWISE,
+    "180": cv2.ROTATE_180,
+}
+DEFAULT_ROTATION = "ccw90"
+
+
+def rotate_frame(frame: np.ndarray, rotation: str = DEFAULT_ROTATION) -> np.ndarray:
+    """Rotate a raw camera frame into the upright viewing orientation."""
+    code = ROTATION_CHOICES.get(rotation)
+    if code is None or frame is None:
+        return frame
+    return cv2.rotate(frame, code)
+
+
+class _RotatedCapture:
+    """
+    Thin wrapper around cv2.VideoCapture that rotates every frame on read().
+    All other attributes/methods (isOpened, release, get, set, ...) pass through.
+    """
+
+    def __init__(self, cap: cv2.VideoCapture, rotation: str = DEFAULT_ROTATION):
+        self._cap = cap
+        self.rotation = rotation
+
+    def read(self):
+        ok, frame = self._cap.read()
+        if ok and frame is not None:
+            frame = rotate_frame(frame, self.rotation)
+        return ok, frame
+
+    def __getattr__(self, name):
+        return getattr(self._cap, name)
+
+
+def _open_camera(idx: int, rotation: str = "none"):
+    """Open a camera. Pass rotation='ccw90' (etc.) to get upright, rotated frames."""
     cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
     if not cap.isOpened():
         cap = cv2.VideoCapture(idx, cv2.CAP_ANY)
     if not cap.isOpened():
         cap = cv2.VideoCapture(idx)
+    if rotation and rotation != "none":
+        return _RotatedCapture(cap, rotation)
     return cap
+
+
+def _cap_rotation(cap) -> str:
+    return getattr(cap, "rotation", "none")
+
+
+def _check_calibration_orientation(calib_data: Dict[str, Any], rotation: str, frame_shape=None) -> None:
+    """Warn loudly if the saved calibration was made in a different orientation / resolution."""
+    saved_rot = calib_data.get("rotation")
+    if saved_rot is None:
+        print("[WARN] height_calibration.json has no 'rotation' field — it was made with the OLD "
+              "(unrotated) camera view.\n"
+              "       Re-run:  python pipeline.py --mode webcam --target object --ref-object-cm 29.7")
+    elif saved_rot != rotation:
+        print(f"[WARN] Calibration was saved with rotation='{saved_rot}' but camera is now "
+              f"rotation='{rotation}'. Measurements will be wrong — re-run calibration.")
+    saved_size = calib_data.get("frame_size")
+    if frame_shape is not None and saved_size:
+        h, w = frame_shape[:2]
+        if [w, h] != list(saved_size):
+            print(f"[WARN] Calibration frame size {saved_size[0]}x{saved_size[1]} differs from current "
+                  f"{w}x{h}. Re-run calibration for accurate results.")
 
 
 def _run_calibration(cap: cv2.VideoCapture, ref_cm: float) -> Optional[float]:
@@ -177,6 +248,7 @@ def _run_calibration(cap: cv2.VideoCapture, ref_cm: float) -> Optional[float]:
     print(f"  3. Press SPACE to freeze the camera frame.")
     print(f"  4. Draw a box from very top to very bottom of the reference object.")
     print(f"  5. Press ENTER to confirm, or ESC to abort.")
+    print(f"  (View rotation: {_cap_rotation(cap)} — calibration is saved in this rotated view)")
     print(f"=========================================\n")
 
     # Camera loop
@@ -210,15 +282,19 @@ def _run_calibration(cap: cv2.VideoCapture, ref_cm: float) -> Optional[float]:
         print("[WARN] Calibration cancelled. No bounding box drawn.")
         return None
 
+    # frozen_frame is already rotated, so rh / ry are in the rotated (upright) coordinates
     pixels_per_cm = rh / ref_cm
     base_y = ry + rh
+    fh, fw = frozen_frame.shape[:2]
     from src.height.height_webcam import save_calibration_data
-    save_calibration_data(pixels_per_cm, base_y)
+    save_calibration_data(pixels_per_cm, base_y, rotation=_cap_rotation(cap), frame_size=(fw, fh))
     
     print(f"\n[SUCCESS] Calibration saved!")
     print(f"          Reference Height : {ref_cm} cm")
     print(f"          Pixel Height     : {rh} px")
     print(f"          Base Y Pixel     : {base_y} px")
+    print(f"          Rotation         : {_cap_rotation(cap)}")
+    print(f"          Frame Size (WxH) : {fw} x {fh}")
     print(f"          Scale Factor     : {pixels_per_cm:.4f} px/cm")
     print(f"          Saved to         : config/height_calibration.json\n")
     return pixels_per_cm
@@ -281,7 +357,9 @@ def _run_person_calibration(cap, ref_person_cm: float) -> Optional[float]:
                 return None
                 
             pixels_per_cm = pixel_span / target_cm
-            save_calibration_data(pixels_per_cm, base_y=feet[1])
+            fh, fw = frame.shape[:2]
+            save_calibration_data(pixels_per_cm, base_y=feet[1],
+                                  rotation=_cap_rotation(cap), frame_size=(fw, fh))
             
             cv2.destroyWindow("Person Calibration")
             print(f"\n[SUCCESS] Calibration saved successfully!")
@@ -293,7 +371,6 @@ def _run_person_calibration(cap, ref_person_cm: float) -> Optional[float]:
             return pixels_per_cm
 
 from src.skin.mst_pipeline.pipeline import MSTPipeline
-
 def _cli_person_webcam(args) -> None:
     """Live-view CLI for single-webcam person height measurement using pre-calibrated scale."""
     import collections
@@ -302,14 +379,19 @@ def _cli_person_webcam(args) -> None:
     from src.height.height_webcam import get_person_height_webcam, load_calibration_data
 
     cam_idx = getattr(args, "left_cam", 0)
-    cap = _open_camera(cam_idx)
+    rotation = getattr(args, "rotate", DEFAULT_ROTATION)
+    cap = _open_camera(cam_idx, rotation=rotation)
     if not cap.isOpened():
         print(f"[ERROR] Could not open camera index {cam_idx}.")
         return
 
+    # Calibration values were saved in the rotated coordinate system,
+    # and cap.read() returns rotated frames, so they line up directly.
     calib_data = load_calibration_data()
     scale = calib_data["pixels_per_cm"]
     calibrated_base_y = calib_data["calibrated_base_y"]
+    ok_probe, probe = cap.read()
+    _check_calibration_orientation(calib_data, rotation, probe.shape if ok_probe else None)
 
     manual_scale = getattr(args, "manual_scale", None)
     if manual_scale is not None:
@@ -415,20 +497,7 @@ def _cli_person_webcam(args) -> None:
             if flag and h_cm is not None and src in ("calibrated_scale", "default_scale"):
                 mst_category = saved_mst_result.mst.mst_category if saved_mst_result else "Scanning..."
                 print(f"\r  when position is OKKK height_cm={median_h:.1f} | MST={mst_category} | source={src:<18s}", end="", flush=True)
-                snapshot_path="/currentcapture.jpg"
-                cv2.imwrite(snapshot_path,frame)
-                import subprocess
-                try:
-                    subprocess.run([
-                        sys.executable, "./src/fit/inference.py",
-                        "-i", snapshot_path,
-                        "-ht",
-                        str(int(median_h))
-                    ], check=True)
-                    print("\n[INFO] Inference pipeline executed successfully. Exiting live view.")
-                    break
-                except subprocess.CalledProcessError as e:
-                    print(f"\n[ERROR] Inference script failed: {e}")
+
         else:
             status_colour = (0, 165, 255) # Orange
             height_txt = "Height: Detecting..."
@@ -462,8 +531,9 @@ def _cli_webcam(args: argparse.Namespace) -> None:
     from src.height.target_detector import PersonTopPoint, ROIBoundingBoxDetector
     from src.height.height_webcam import load_calibration_scale
 
-    print(f"[INFO] Opening webcam index {args.left_cam}...")
-    cap = _open_camera(args.left_cam)
+    rotation = getattr(args, "rotate", DEFAULT_ROTATION)
+    print(f"[INFO] Opening webcam index {args.left_cam} (rotation: {rotation})...")
+    cap = _open_camera(args.left_cam, rotation=rotation)
     if not cap.isOpened():
         print("[ERROR] Could not open camera.")
         sys.exit(1)
@@ -547,8 +617,9 @@ def _cli_stereo(args: argparse.Namespace) -> None:
         return
 
     calibration = load_calibration(args.calibration)
-    cap_l = _open_camera(args.left_cam)
-    cap_r = _open_camera(args.right_cam)
+    # Stereo rigs keep their own calibration; no rotation applied here.
+    cap_l = _open_camera(args.left_cam, rotation="none")
+    cap_r = _open_camera(args.right_cam, rotation="none")
 
     if not cap_l.isOpened() or not cap_r.isOpened():
         print("[ERROR] Could not open stereo cameras.")
@@ -590,6 +661,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ref-object-cm", type=float, default=None)
     p.add_argument("--ref-person-cm", type=float, default=None)
     p.add_argument("--person-mode", action="store_true")
+    p.add_argument("--rotate", choices=list(ROTATION_CHOICES.keys()), default=DEFAULT_ROTATION,
+                   help="Rotate camera frames before display AND measurement "
+                        "(default: ccw90 = 90° counter-clockwise for the sideways Pi camera mount).")
     # MST Pipeline Flags
     p.add_argument("--no-mediapipe", action="store_true", help="Use Haar cascade fallback.")
     p.add_argument("--no-white-balance", action="store_true", help="Disable white balance.")
@@ -604,7 +678,7 @@ if __name__ == "__main__":
     args = _build_parser().parse_args()
 
     if getattr(args, "ref_person_cm", None) is not None:
-        cap = _open_camera(args.left_cam)
+        cap = _open_camera(args.left_cam, rotation=args.rotate)
         if not cap.isOpened():
             print(f"[ERROR] Could not open camera.")
             sys.exit(1)

@@ -30,6 +30,38 @@ def _get_pose_detector() -> Any:
     return _pose_instance
 
 
+def _head_box(landmarks, w: int, h: int, vis_threshold: float = 0.5):
+    """
+    Square box around the head (x0, y0, x1, y1) from the MediaPipe Pose face points
+    (0 nose, 1-6 eyes, 7/8 ears, 9/10 mouth). Returns None if the face is not visible enough.
+    Used as a hint so face detection can run on an enlarged head crop.
+    """
+    nose, l_eye, r_eye = landmarks[0], landmarks[2], landmarks[5]
+    if min(nose.visibility, l_eye.visibility, r_eye.visibility) < vis_threshold:
+        return None
+
+    eye_y = (l_eye.y + r_eye.y) / 2.0 * h
+    cx = (l_eye.x + r_eye.x) / 2.0 * w
+
+    # face width: ear-to-ear if both ears are visible, else estimated from the outer eye corners
+    face_w = 1.6 * abs(landmarks[3].x - landmarks[6].x) * w
+    l_ear, r_ear = landmarks[7], landmarks[8]
+    if min(l_ear.visibility, r_ear.visibility) >= vis_threshold:
+        face_w = max(face_w, abs(l_ear.x - r_ear.x) * w)
+    if face_w < 8:
+        return None
+
+    side = 2.4 * face_w          # head + hair + a margin of context
+    half = side / 2.0
+    box = (cx - half, eye_y - half, cx + half, eye_y + half)
+    x0, y0, x1, y1 = box
+    x0, x1 = max(0, int(x0)), min(w, int(x1))
+    y0, y1 = max(0, int(y0)), min(h, int(y1))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
 def get_head_foot_pixels(
     frame: np.ndarray,
     pose: Optional[Any] = None
@@ -39,6 +71,8 @@ def get_head_foot_pixels(
     
     * Head Top: Nose shifted up vertically by 5% of the frame height.
     * Feet: Mean coordinates of left and right ankle landmarks.
+    * head_box (optional key): square box around the head, used to enlarge the face
+      for skin-tone detection.
     """
     if frame is None or frame.size == 0:
         return None
@@ -95,10 +129,14 @@ def get_head_foot_pixels(
     foot_x = max(0, min(w - 1, foot_x))
     foot_y = max(0, min(h - 1, foot_y))
 
-    return {
+    result = {
         "head": (head_x, head_y),
         "feet": (foot_x, foot_y)
     }
+    head_box = _head_box(landmarks, w, h)
+    if head_box is not None:
+        result["head_box"] = head_box
+    return result
 
 
 def draw_landmarks_overlay(
@@ -123,5 +161,11 @@ def draw_landmarks_overlay(
 
     if head and feet:
         cv2.line(display, head, feet, (0, 255, 255), 2)
+
+    box = landmarks.get("head_box")
+    if box:
+        cv2.rectangle(display, (box[0], box[1]), (box[2], box[3]), (255, 200, 0), 1)
+        cv2.putText(display, "FACE ROI", (box[0], max(12, box[1] - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0), 1, cv2.LINE_AA)
 
     return display

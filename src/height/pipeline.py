@@ -457,6 +457,8 @@ def _cli_person_webcam(args) -> None:
     mst_in_progress = False
     def print_mst_summary(result) -> None:
         print(f"Backend used:       {result.backend}")
+        print(f"Face found via:     {getattr(result, 'detection_source', 'full_frame')}"
+              f" (crop x{getattr(result, 'crop_scale', 1.0):.1f})")
         print(f"MST category:       {result.mst.mst_category}  (1=lightest, 10=darkest)")
         print(f"Confidence:         {result.mst.confidence:.2f}  (separation from runner-up category)")
         print(f"Sample Lab (L,a,b): {tuple(round(x, 2) for x in result.mst.sample_lab)}")
@@ -472,10 +474,10 @@ def _cli_person_webcam(args) -> None:
             marker = "  <-- best match" if cat == result.mst.mst_category else ""
             print(f"  MST-{cat}: {dist:6.2f}{marker}")
         print()
-    def run_mst_async(frame_bgr: np.ndarray):
+    def run_mst_async(frame_bgr: np.ndarray, face_hint=None):
         nonlocal saved_mst_result, mst_status_str, mst_in_progress
         try:
-            res = mst_pipeline.classify_array(frame_bgr)
+            res = mst_pipeline.classify_array(frame_bgr, face_hint=face_hint)
             saved_mst_result = res
             mst_status_str = f"MST-{res.mst.mst_category}"
             print_mst_summary(res)
@@ -493,15 +495,16 @@ def _cli_person_webcam(args) -> None:
         ok, frame = cap.read()
         if not ok:
             break
+        lm = get_head_foot_pixels(frame)
         if not mst_in_progress:
             mst_in_progress=True
-            t=threading.Thread(target=run_mst_async, args=(frame.copy(),),daemon=True)
+            head_box = lm.get("head_box") if lm else None
+            t=threading.Thread(target=run_mst_async, args=(frame.copy(), head_box),daemon=True)
             t.start()
 
         display = frame.copy()
         cv2.putText(display, f"Scale: {scale_label}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
-        lm = get_head_foot_pixels(frame)
         flag=False
         
         # Position helper logic

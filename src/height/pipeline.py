@@ -370,6 +370,52 @@ def _run_person_calibration(cap, ref_person_cm: float) -> Optional[float]:
             print(f"          Saved to      : config/height_calibration.json\n")
             return pixels_per_cm
 
+def _make_fit_client(args):
+    """Start the body-fit worker (separate Python env) if an HMR python is configured."""
+    if getattr(args, "no_fit", False):
+        return None
+    hmr_python = getattr(args, "hmr_python", None) or os.environ.get("HMR_PYTHON")
+    if not hmr_python:
+        print("[INFO] Body fit disabled. To enable it pass --hmr-python <path-to-hmr-env-python.exe> "
+              "or set the HMR_PYTHON environment variable.")
+        return None
+    from src.height.fit_client import FitClient
+    fit_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fit")
+    client = FitClient(hmr_python, fit_dir)
+    client.start()
+    print(f"[INFO] Body-fit worker starting in the background (log: {client.log_path})")
+    return client
+
+
+def _put_text(img, text, org, scale, colour, thick=1):
+    """Text with a dark outline so it stays readable on any background."""
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, colour, thick, cv2.LINE_AA)
+
+
+def _draw_fit_panel(display, fit, y0: int = 110) -> None:
+    state, msg, result = fit.snapshot()
+    if state == "starting":
+        head, colour = "FIT: loading models...", (0, 255, 255)
+    elif state == "running":
+        head, colour = "FIT: running (can take a few seconds)...", (0, 255, 255)
+    elif state == "error":
+        head, colour = "FIT: unavailable", (0, 0, 255)
+    else:
+        head, colour = "FIT: ready - press SPACE / ENTER", (0, 255, 0)
+    _put_text(display, head, (10, y0), 0.6, colour, 2)
+    y = y0 + 24
+    if msg:
+        _put_text(display, msg[:60], (10, y), 0.5, (0, 165, 255))
+        y += 22
+    if result:
+        _put_text(display, f"Fit @ {result['height_cm']:.1f} cm input:", (10, y), 0.5, (255, 255, 255))
+        y += 22
+        for name, value in result["measurements"].items():
+            _put_text(display, f"{name}: {value:.1f}", (10, y), 0.5, (255, 255, 255))
+            y += 20
+
+
 from src.skin.mst_pipeline.pipeline import MSTPipeline
 def _cli_person_webcam(args) -> None:
     """Live-view CLI for single-webcam person height measurement using pre-calibrated scale."""
@@ -392,6 +438,8 @@ def _cli_person_webcam(args) -> None:
     calibrated_base_y = calib_data["calibrated_base_y"]
     ok_probe, probe = cap.read()
     _check_calibration_orientation(calib_data, rotation, probe.shape if ok_probe else None)
+
+    fit = _make_fit_client(args)
 
     manual_scale = getattr(args, "manual_scale", None)
     if manual_scale is not None:
@@ -516,12 +564,25 @@ def _cli_person_webcam(args) -> None:
             mst_color = (0, 165, 255)  # Orange while initially scanning
         cv2.putText(display, mst_display_str, (10, H_frame - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, mst_color, 2, cv2.LINE_AA)
+        if fit is not None:
+            _draw_fit_panel(display, fit)
         cv2.imshow("KYRA Person Height (webcam)", display)
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
             break
+        if key in (13, 32) and fit is not None:  # ENTER / SPACE -> run body fit
+            if not history:
+                fit.set_note("Wait for a stable height reading first")
+            else:
+                fit_height = float(np.median(list(history)))
+                if fit.request(frame, fit_height):
+                    print(f"\n[FIT] Running body fit with height {fit_height:.1f} cm ...")
+                else:
+                    fit.set_note("Fit worker not ready / busy")
 
     print()
+    if fit is not None:
+        fit.close()
     cap.release()
     cv2.destroyAllWindows()
 
@@ -661,6 +722,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ref-object-cm", type=float, default=None)
     p.add_argument("--ref-person-cm", type=float, default=None)
     p.add_argument("--person-mode", action="store_true")
+    p.add_argument("--hmr-python", default=None,
+                   help="Path to python.exe of the HMR (Python 3.7 + TF 1.15) environment. "
+                        "Can also be set with the HMR_PYTHON environment variable.")
+    p.add_argument("--no-fit", action="store_true", help="Disable the body-fit worker.")
     p.add_argument("--rotate", choices=list(ROTATION_CHOICES.keys()), default=DEFAULT_ROTATION,
                    help="Rotate camera frames before display AND measurement "
                         "(default: ccw90 = 90° counter-clockwise for the sideways Pi camera mount).")

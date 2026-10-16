@@ -19,11 +19,23 @@ import json
 import numpy as np
 
 curr_path = osp.dirname(osp.abspath(__file__))
-model_dir = osp.join(curr_path, '..', 'models')
-if not osp.exists(model_dir):
-    print('Fix path to models/')
-    import ipdb
-    ipdb.set_trace()
+model_dir = osp.abspath(osp.join(curr_path, '..', 'models'))
+_MODELS_HELP = (
+    "\n\nHMR model files not found.\n"
+    "Expected folder: %s\n"
+    "It must contain:\n"
+    "  neutral_smpl_with_cocoplus_reg.pkl\n"
+    "  model.ckpt-667589.data-00000-of-00001\n"
+    "  model.ckpt-667589.index\n"
+    "  model.ckpt-667589.meta\n"
+    "Download them from the HMR repo (models.tar.gz):\n"
+    "  https://people.eecs.berkeley.edu/~kanazawa/cachedir/hmr/models.tar.gz\n"
+    "and extract so the files sit directly inside the folder above." % model_dir
+)
+if not osp.isdir(model_dir):
+    raise IOError(_MODELS_HELP)
+if not osp.exists(osp.join(model_dir, 'neutral_smpl_with_cocoplus_reg.pkl')):
+    raise IOError(_MODELS_HELP)
 SMPL_MODEL_PATH = osp.join(model_dir, 'neutral_smpl_with_cocoplus_reg.pkl')
 SMPL_FACE_PATH = osp.join(curr_path, '../src/tf_smpl', 'smpl_faces.npy')
 
@@ -60,7 +72,10 @@ flags.DEFINE_string(
 DATA_DIR = '/scratch1/projects/tf_datasets/'
 
 flags.DEFINE_string('data_dir', DATA_DIR, 'Where to save training models')
-flags.DEFINE_string('log_dir', 'logs', 'Where to save training models')
+# Newer absl-py already defines --log_dir (absl.logging); defining it again raises
+# DuplicateFlagError. Only define it when absent. It is only used for training.
+if 'log_dir' not in flags.FLAGS:
+    flags.DEFINE_string('log_dir', 'logs', 'Where to save training models')
 flags.DEFINE_string('model_dir', None, 'Where model will be saved -- filled automatically')
 flags.DEFINE_integer('log_img_step', 100, 'How often to visualize img during training')
 flags.DEFINE_integer('epoch', 100, '# of epochs to train')
@@ -116,9 +131,7 @@ def prepare_dirs(config, prefix=['HMR']):
     # Continue training from a load_path
     if config.load_path:
         if not osp.exists(config.load_path):
-            print("load_path: %s doesnt exist..!!!" % config.load_path)
-            import ipdb
-            ipdb.set_trace()
+            raise IOError("load_path: %s doesnt exist..!!!" % config.load_path)
         print('continuing from %s!' % config.load_path)
 
         # Check for changed training parameter:
@@ -152,8 +165,8 @@ def prepare_dirs(config, prefix=['HMR']):
 
         if len(diff_keys) > 0:
             print("really continue??")
-            import ipdb
-            ipdb.set_trace()
+            if input("Type 'y' to continue: ").strip().lower() != 'y':
+                raise SystemExit("Aborted.")
 
         config.model_dir = config.load_path
 

@@ -1,0 +1,18 @@
+hmr37/
+.venv/
+
+# model weights and downloads (large / licensed)
+src/fit/models/
+src/fit/deeplab_model/
+*.tar.gz
+
+# generated files
+__pycache__/
+*.pyc
+*.orig
+src/fit/fit_worker.log
+test.obj
+
+# machine-specific calibration (redo per camera/mount)
+config/height_calibration.json
+src/height/config/height_calibration.json
